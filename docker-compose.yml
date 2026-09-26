@@ -32,7 +32,11 @@ services:
     build:
       context: ./backend
     command: >
-      uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      uvicorn app.main:app --host 0.0.0.0 --port 8000
+    # --reload is deliberately not used here: Docker Desktop's Windows bind
+    # mounts cannot deliver inotify events, so the reloader dies with
+    # "Cannot allocate memory". Source is still bind-mounted, so
+    # `docker compose restart backend` picks up edits without a rebuild.
     environment:
       DATABASE_URL: postgresql+psycopg://wallet:wallet@postgres:5432/wallet
       REDIS_URL: redis://redis:6379/0

@@ -77,10 +77,20 @@ def engine():
 
 @pytest.fixture
 def db(engine) -> Generator[Session, None, None]:
-    """A session whose work is rolled back at the end of the test."""
+    """A session whose work is rolled back at the end of the test.
+
+    ``join_transaction_mode="create_savepoint"`` is essential: the application
+    calls ``session.commit()`` inside request handlers, and without a savepoint
+    those commits would also commit the outer transaction, leaking rows into
+    every subsequent test.
+    """
     connection = engine.connect()
     transaction = connection.begin()
-    session = Session(bind=connection, autoflush=False, expire_on_commit=False)
+    session = Session(
+        bind=connection,
+        autoflush=False,
+        expire_on_commit=False,
+    )
     try:
         yield session
     finally:
