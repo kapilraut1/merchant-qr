@@ -56,12 +56,13 @@ class SettlementResult:
         return self.batch is not None
 
 
-def _day_bounds(target: date) -> tuple[datetime, datetime]:
+def day_bounds(target: date) -> tuple[datetime, datetime]:
     """Half-open [start, end) UTC range covering ``target``.
 
     Half-open bounds keep the query index-friendly and make midnight itself
     unambiguous: a transaction created exactly at 00:00:00 belongs to the new
-    day, not both.
+    day, not both. Shared with the transaction listing endpoint so a payment can
+    never be counted in one day by one screen and another day by the next.
     """
     start = datetime.combine(target, time.min, tzinfo=UTC)
     return start, start + timedelta(days=1)
@@ -78,7 +79,7 @@ def unsettled_transactions(
     The ``settlement_items.id IS NULL`` predicate is what makes a repeat run a
     no-op instead of double-paying a merchant.
     """
-    start, end = _day_bounds(target)
+    start, end = day_bounds(target)
     stmt = (
         select(Transaction)
         .outerjoin(SettlementItem, SettlementItem.transaction_id == Transaction.id)

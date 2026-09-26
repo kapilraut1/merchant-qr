@@ -5,14 +5,23 @@ unauthenticated: the signed invoice plus the caller's own wallet is the
 "authentication" in this simulation.
 """
 
+from datetime import UTC, date, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Path, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Response, status
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.deps import get_current_merchant
+from app.core.money import ZERO, quantize_money
 from app.db import get_db
-from app.models import Transaction
-from app.schemas import PaymentCreate, PaymentResponse, TransactionOut
+from app.models import Merchant, Transaction, TransactionStatus
+from app.schemas import (
+    PaymentCreate,
+    PaymentResponse,
+    TransactionListOut,
+    TransactionOut,
+)
 from app.services.payments import (
     IdempotencyKeyConflictError,
     InvoiceMismatchError,
@@ -22,6 +31,7 @@ from app.services.payments import (
     process_payment,
     resolve_invoice,
 )
+from app.services.settlements import day_bounds
 
 router = APIRouter(tags=["transactions"])
 
@@ -115,3 +125,67 @@ def get_transaction(
             detail=f"Transaction {transaction_id} not found",
         )
     return PaymentResponse.model_validate(transaction)
+
+
+@router.get(
+    "/merchants/{merchant_id}/transactions",
+    response_model=TransactionListOut,
+    summary="A merchant's transactions for one day",
+)
+def list_merchant_transactions(
+    merchant_id: Annotated[int, Path(ge=1)],
+    current: Annotated[Merchant, Depends(get_current_merchant)],
+    db: Annotated[Session, Depends(get_db)],
+    on_date: Annotated[
+        date | None,
+        Query(alias="date", description="Day to report. Defaults to today (UTC)."),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> TransactionListOut:
+    if current.id != merchant_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only read transactions for your own merchant account",
+        )
+
+    target = on_date or datetime.now(UTC).date()
+    start, end = day_bounds(target)
+
+    rows = db.scalars(
+        select(Transaction)
+        .where(
+            Transaction.merchant_id == merchant_id,
+            Transaction.created_at >= start,
+            Transaction.created_at < end,
+        )
+        .order_by(Transaction.created_at.desc(), Transaction.id.desc())
+        .limit(limit)
+    ).all()
+
+    # Counted over every completed payment in the day, not just the visible
+    # page, so "collected" stays correct when the list is truncated.
+    total = db.scalar(
+        select(func.coalesce(func.sum(Transaction.amount), 0)).where(
+            Transaction.merchant_id == merchant_id,
+            Transaction.status == TransactionStatus.COMPLETED,
+            Transaction.created_at >= start,
+            Transaction.created_at < end,
+        )
+    )
+    count = db.scalar(
+        select(func.count())
+        .select_from(Transaction)
+        .where(
+            Transaction.merchant_id == merchant_id,
+            Transaction.created_at >= start,
+            Transaction.created_at < end,
+        )
+    )
+
+    return TransactionListOut(
+        merchant_id=merchant_id,
+        date=target,
+        count=count or 0,
+        total_amount=quantize_money(total or ZERO),
+        transactions=[TransactionOut.model_validate(row) for row in rows],
+    )

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -57,3 +57,18 @@ class InvoiceOut(BaseModel):
     expires_at: int
     qr_payload: str
     expires_in: int
+
+
+class TransactionListOut(BaseModel):
+    """A merchant's transactions for one day, with the day's takings.
+
+    ``total_amount`` sums only completed payments, so it is the figure the
+    dashboard shows as "collected"; failed attempts are visible in the rows but
+    never inflate the total.
+    """
+
+    merchant_id: int
+    date: date
+    count: int
+    total_amount: Decimal
+    transactions: list[TransactionOut]
