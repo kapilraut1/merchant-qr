@@ -8,6 +8,10 @@ venv/
 .coverage
 htmlcov/
 *.egg-info/
+# Celery beat's PersistentScheduler state. It is a runtime artefact that
+# rewrites itself on every schedule change, so it must never be committed.
+celerybeat-schedule*
+celerybeat.pid
 
 # Node
 node_modules/

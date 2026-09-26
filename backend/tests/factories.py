@@ -4,8 +4,10 @@ Keeping request/row construction in one place means an individual test reads
 as a statement about behaviour rather than a pile of setup.
 """
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -117,15 +119,23 @@ def make_transaction(
     amount: str = "100.00",
     status: TransactionStatus = TransactionStatus.COMPLETED,
     idempotency_key: str | None = None,
+    created_at: datetime | None = None,
 ) -> Transaction:
-    """Insert a transaction directly, bypassing the payment endpoint."""
-    transaction = Transaction(
-        merchant_id=merchant_id,
-        wallet_id=wallet_id,
-        amount=Decimal(amount),
-        status=status,
-        idempotency_key=idempotency_key or f"seed-{id(db)}-{merchant_id}-{amount}",
-    )
+    """Insert a transaction directly, bypassing the payment endpoint.
+
+    ``created_at`` is settable so settlement tests can place transactions on
+    specific days, which is what the day-bucketing query depends on.
+    """
+    values: dict[str, Any] = {
+        "merchant_id": merchant_id,
+        "wallet_id": wallet_id,
+        "amount": Decimal(amount),
+        "status": status,
+        "idempotency_key": idempotency_key or f"seed-{uuid4().hex[:12]}",
+    }
+    if created_at is not None:
+        values["created_at"] = created_at
+    transaction = Transaction(**values)
     db.add(transaction)
     db.flush()
     return transaction

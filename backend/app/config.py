@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     cors_origins: str = "*"
 
     settlement_currency: str = "NPR"
+    # Day boundaries for the nightly batch. Transactions are stored in UTC, so
+    # this decides which local day a payment is settled in.
+    settlement_timezone: str = "UTC"
 
     @property
     def cors_origin_list(self) -> list[str]:

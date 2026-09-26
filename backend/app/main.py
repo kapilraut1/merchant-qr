@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app import __version__
 from app.api.invoices import router as invoices_router
 from app.api.merchants import router as merchants_router
+from app.api.settlements import router as settlements_router
 from app.api.transactions import router as transactions_router
 from app.api.wallets import router as wallets_router
 from app.config import get_settings
@@ -76,6 +77,7 @@ app.include_router(merchants_router)
 app.include_router(wallets_router)
 app.include_router(invoices_router)
 app.include_router(transactions_router)
+app.include_router(settlements_router)
 
 
 @app.get("/", tags=["ops"], summary="Service banner")

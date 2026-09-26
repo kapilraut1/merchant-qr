@@ -31,8 +31,12 @@ services:
   backend:
     build:
       context: ./backend
+    # One image shared by backend/worker/beat. Declaring the same explicit
+    # `image` name everywhere means the stack builds the Python image once
+    # instead of three times, and the three services can never drift apart.
+    image: merchant-qr-settlement-backend:latest
     command: >
-      uvicorn app.main:app --host 0.0.0.0 --port 8000
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     # --reload is deliberately not used here: Docker Desktop's Windows bind
     # mounts cannot deliver inotify events, so the reloader dies with
     # "Cannot allocate memory". Source is still bind-mounted, so
@@ -63,6 +67,48 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
+
+  worker:
+    image: merchant-qr-settlement-backend:latest
+    # No migrations here: the backend service owns schema changes, and depends_on
+    # below guarantees it finished `alembic upgrade head` before this starts.
+    command: celery -A app.celery_app.celery_app worker --loglevel=info --concurrency=2
+    environment:
+      DATABASE_URL: postgresql+psycopg://wallet:wallet@postgres:5432/wallet
+      REDIS_URL: redis://redis:6379/0
+      ENVIRONMENT: development
+      JWT_SECRET: dev-secret-change-me
+    volumes:
+      - ./backend:/app
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  beat:
+    image: merchant-qr-settlement-backend:latest
+    # Beat just publishes the nightly job to Redis every 24h. Re-publishing
+    # after a restart is harmless because settlement is idempotent: a second
+    # run for the same day finds nothing unsettled and exits.
+    # --schedule points outside the bind mount on purpose: Celery's
+    # PersistentScheduler writes its state file to the working directory, and
+    # /app is the repo, so the default would drop a binary blob in the tree.
+    command: >
+      celery -A app.celery_app.celery_app beat --loglevel=info
+      --schedule=/tmp/celerybeat-schedule
+    environment:
+      DATABASE_URL: postgresql+psycopg://wallet:wallet@postgres:5432/wallet
+      REDIS_URL: redis://redis:6379/0
+      ENVIRONMENT: development
+      JWT_SECRET: dev-secret-change-me
+    volumes:
+      - ./backend:/app
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   frontend:
     build:
