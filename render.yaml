@@ -1,0 +1,126 @@
+# Render Blueprint for the backend half of the stack.
+# The frontend is deployed separately to Vercel (see README, "Deploying").
+#
+# Apply from the Render dashboard: New > Blueprint > point at this repo.
+# Anything marked `sync: false` is prompted for at apply time, so no secret is
+# ever committed here.
+
+databases:
+  - name: settlement-db
+    databaseName: wallet
+    user: wallet
+    # Same major version as docker-compose.yml, so the schema matches dev.
+    postgresMajorVersion: "16"
+    plan: basic-256mb
+
+services:
+  # ---------------------------------------------------------------- Redis ---
+  # Backs the Celery broker. Only the worker/beat in this blueprint talk to it,
+  # so the allowlist stays empty (internal traffic only).
+  - type: redis
+    name: settlement-redis
+    plan: starter
+    ipAllowList: []
+
+  # --------------------------------------------------------------- Web/API ---
+  - type: web
+    name: settlement-api
+    runtime: docker
+    dockerContext: ./backend
+    dockerfilePath: ./backend/Dockerfile
+    plan: starter
+    healthCheckPath: /health/ready
+
+    # Migrations run here rather than in a preDeployCommand on purpose:
+    # preDeployCommand is best-effort and only runs on the web service, so a
+    # new Deployment that boots before migrations finish would serve requests
+    # against a stale schema. Running them in the start command means the
+    # container never listens until the schema is current.
+    #
+    # This is safe for a single instance. If you scale to 2+ replicas, move
+    # this to a one-off release command instead -- otherwise every replica
+    # races to run `alembic upgrade head` on boot.
+    startCommand: >-
+      sh -c "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"
+
+    envVars:
+      # NOT `fromDatabase`: Render hands back a `postgresql://` URL, and
+      # SQLAlchemy maps that scheme to psycopg2, which is not a dependency here
+      # (this service uses psycopg 3). Enter the same string from the Render
+      # Postgres dashboard with the scheme changed to `postgresql+psycopg://`.
+      # See README for the exact format.
+      - key: DATABASE_URL
+        sync: false
+
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: settlement-redis
+          property: connectionString
+
+      - key: JWT_SECRET
+        generateValue: true
+
+      # The Vercel dashboard URL, e.g. https://merchant-settlement.vercel.app
+      # Comma-separated for multiple domains. Leaving this as `*` means any
+      # site can call the API from a visitor's browser.
+      - key: CORS_ORIGINS
+        sync: false
+
+      - key: ENVIRONMENT
+        value: production
+
+  # ----------------------------------------------------------------- Worker ---
+  # Consumes settlement jobs off Redis. Long-running, so a Background Worker
+  # is the right Render type.
+  - type: worker
+    name: settlement-worker
+    runtime: docker
+    dockerContext: ./backend
+    dockerfilePath: ./backend/Dockerfile
+    plan: starter
+    dockerCommand: celery -A app.celery_app.celery_app worker --loglevel=info --concurrency=2
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: settlement-redis
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ENVIRONMENT
+        value: production
+
+  # ------------------------------------------------------------------- Beat ---
+  # NOT a background worker. `celery beat` is a scheduler that publishes one
+  # job and then exits, and Render kills any service that does not stay up, so
+  # beat as a long-running service would restart-loop all night.
+  #
+  # A Cron Job fits the actual requirement: the only thing beat does for this
+  # app is publish `settlement.settle_all_merchants` at 00:05 UTC. `celery call`
+  # enqueues that task and exits immediately; settlement-worker runs it.
+  #
+  # 00:05 rather than 00:00 so the day window has fully closed, matching the
+  # schedule in app/celery_app.py.
+  - type: cron
+    name: settlement-nightly
+    runtime: docker
+    dockerContext: ./backend
+    dockerfilePath: ./backend/Dockerfile
+    plan: starter
+    schedule: "5 0 * * *"
+    dockerCommand: celery -A app.celery_app.celery_app call settlement.settle_all_merchants
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: settlement-redis
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ENVIRONMENT
+        value: production

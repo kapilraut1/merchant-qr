@@ -181,6 +181,95 @@ Backend settings are environment variables (see `backend/app/config.py`):
 
 Frontend: `VITE_API_BASE_URL` is baked into the bundle at build time.
 
+## Deploying
+
+Split across two providers: the API, worker, database and scheduler on Render;
+the static dashboard on Vercel.
+
+### 1. Backend on Render
+
+`render.yaml` is a [Blueprint](https://render.com/docs/blueprint-spec). In the
+Render dashboard choose **New → Blueprint** and point it at this repo. Render
+will prompt for the two values marked `sync: false` and generate `JWT_SECRET` for
+you. That creates five resources: a Postgres 16 database, a Redis instance, the
+API web service, a Celery background worker, and a nightly cron job.
+
+Two values need care.
+
+**`DATABASE_URL` must use the `postgresql+psycopg://` scheme.** Copy the
+connection string from the Render Postgres dashboard and change only the
+prefix:
+
+```
+postgresql://wallet:abc123@dpg-x1234/wallet          # what Render shows
+postgresql+psycopg://wallet:abc123@dpg-x1234/wallet   # what this app needs
+```
+
+SQLAlchemy reads a bare `postgresql://` as *psycopg2*, which is not a dependency
+here — this service uses psycopg 3. The unmodified string fails at startup with
+`ModuleNotFoundError: No module named 'psycopg2'`. The Blueprint cannot do this
+rewrite for you, which is why it asks you to type the value rather than pulling
+it from `fromDatabase`.
+
+**Celery beat is a Cron Job, not a background worker.** `celery beat` publishes
+one job and exits, and Render terminates any service that does not stay up, so
+beat as a long-running service would restart-loop all night. The cron job runs
+`celery call settlement.settle_all_merchants` at 00:05 UTC, which enqueues the
+job and exits; the worker executes it.
+
+After the first deploy, note the API URL (e.g. `https://settlement-api.onrender.com`).
+You need it in the next step, and CORS will not allow the browser until it is set.
+
+### 2. Frontend on Vercel
+
+No `vercel.json` is needed — Vercel detects the Vite preset and the `dist` output
+directory on its own, and the app has no client-side router, so there are no
+SPA rewrites to configure.
+
+| Setting          | Value                        |
+| ---------------- | ---------------------------- |
+| Root Directory   | `frontend`                   |
+| Framework Preset | Vite                         |
+| Build Command    | `npm run build`              |
+| Output Directory | `dist`                       |
+
+Add one environment variable:
+
+| Variable              | Value                                  |
+| --------------------- | -------------------------------------- |
+| `VITE_API_BASE_URL`   | `https://settlement-api.onrender.com`  |
+
+`VITE_*` variables are read at **build** time, so add the variable before the
+first production build, and redeploy (not just restart) after changing it.
+
+### 3. Set CORS last
+
+Now that the Vercel URL exists, set `CORS_ORIGINS` on all three Python services
+in Render to your Vercel domain and redeploy. Until you do, the dashboard loads
+but every API call is blocked by the browser, which is a confusing first
+experience. Comma-separate for multiple domains:
+
+```
+https://merchant-settlement.vercel.app,https://merchant-settlement-git-main-you.vercel.app
+```
+
+The per-deployment Vercel URLs are worth including, because every preview deploy
+gets its own origin.
+
+### What this deployment does not give you
+
+- **No rate limiting.** The wallet and payment routes are deliberately
+  unauthenticated — they model the customer's wallet app, authorised by the
+  signed invoice plus the caller's own wallet. Before real traffic, put a WAF or
+  proxy in front of them.
+- **No token revocation.** A leaked `JWT_SECRET` or token stays valid for 12
+  hours with no way to invalidate it early.
+- **No Postgres backups.** Configure them in the Render dashboard; the
+  settlement tables are the financial record of this system.
+- **Migrations run on every container start.** Fine for one instance. If you
+  scale the web service past one replica, move `alembic upgrade head` out of
+  `startCommand` into a one-off release command, or the replicas will race.
+
 ## Tests
 
 ```bash
